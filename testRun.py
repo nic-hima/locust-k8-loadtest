@@ -1,5 +1,5 @@
 ''' Current assumptions:
-    1. Only 1 instance of each microservice on the cluster (at the moment)
+    --
 
 '''
 import os
@@ -9,8 +9,11 @@ import shlex, subprocess
 import datetime
 import time
 from  prometheus_http_client import Prometheus
+from kubernetes import client, config
 import json
 import csv
+import yaml
+from clusterConfig import clusterSetup
 
 #TODO: Add ability to place interference pods on specific nodes in cluster
 #TODO: Add ability to scale different number of pods for each micro-service
@@ -25,7 +28,15 @@ class podDataCollection(object):
 
     def __init__(self, name):
         self.podName = name
-    
+
+# TODO: move static config of this object to a conf file so it isn't hard coded    
+class clusterInfo(object):
+    testNS = "default"
+    workflowDeplList = {"cart": 0, "shipping": 0, "catalogue": 0}
+    iFerenceDepNm = ""
+    interferenceZone = ""
+    interferenceLvl = 0
+
     
 def testDirInit(expName):
     workingDir = os.getcwd()
@@ -106,7 +117,7 @@ def createRawCSVs(tStampList, podNmList, testDirPath, podMetDict):
                 rowDict[pair[0]] = pair[1]
             writer.writerow(rowDict)
 
-    with open(os.path.join(testDirPath, 'container-netR5sRaw.csv'), mode='w') as netW_file:
+    with open(os.path.join(testDirPath, 'container-netW5sRaw.csv'), mode='w') as netW_file:
         fieldnms = ['Pod_Name']
         fieldnms.extend(tStampList)
         writer = csv.DictWriter(netW_file, fieldnames=fieldnms)
@@ -123,11 +134,17 @@ def createRawCSVs(tStampList, podNmList, testDirPath, podMetDict):
 def promQueries(startTime, stopTime, testDirPath):
     prom = Prometheus()
     
-    cpu5s = json.loads(prom.query_rang(metric='sum(container_cpu_usage_seconds_total{namespace="robot-shop"}) by (pod_name)', start=startTime, end=stopTime, step='5s'))
+    cpu5s = json.loads(prom.query_rang(metric='sum(container_cpu_usage_seconds_total{namespace="default"}) by (pod_name)', start=startTime, end=stopTime, step='5s'))
+    memWriteB5s = json.loads(prom.query_rang(metric='sum(container_fs_writes_bytes_total{namespace="default"}) by (pod_name)', start=startTime, end=stopTime, step='5s'))
+    memReadB5s = json.loads(prom.query_rang(metric='sum(container_fs_reads_bytes_total{namespace="default"}) by (pod_name)', start=startTime, end=stopTime, step='5s'))
+    netReadB5s = json.loads(prom.query_rang(metric='sum(container_network_receive_bytes_total{namespace="default"}) by (pod_name)', start=startTime, end=stopTime, step='5s'))
+    netWriteB5s = json.loads(prom.query_rang(metric='sum(container_network_transmit_bytes_total{namespace="default"}) by (pod_name)', start=startTime, end=stopTime, step='5s'))
+
+    """ cpu5s = json.loads(prom.query_rang(metric='sum(container_cpu_usage_seconds_total{namespace="robot-shop"}) by (pod_name)', start=startTime, end=stopTime, step='5s'))
     memWriteB5s = json.loads(prom.query_rang(metric='sum(container_fs_writes_bytes_total{namespace="robot-shop"}) by (pod_name)', start=startTime, end=stopTime, step='5s'))
     memReadB5s = json.loads(prom.query_rang(metric='sum(container_fs_reads_bytes_total{namespace="robot-shop"}) by (pod_name)', start=startTime, end=stopTime, step='5s'))
     netReadB5s = json.loads(prom.query_rang(metric='sum(container_network_receive_bytes_total{namespace="robot-shop"}) by (pod_name)', start=startTime, end=stopTime, step='5s'))
-    netWriteB5s = json.loads(prom.query_rang(metric='sum(container_network_transmit_bytes_total{namespace="robot-shop"}) by (pod_name)', start=startTime, end=stopTime, step='5s'))
+    netWriteB5s = json.loads(prom.query_rang(metric='sum(container_network_transmit_bytes_total{namespace="robot-shop"}) by (pod_name)', start=startTime, end=stopTime, step='5s')) """
     
     # Can use queries below to find rate of change also
     """  cpuAvg = json.loads(prom.query_rang(metric='sum(rate(container_cpu_usage_seconds_total{namespace="robot-shop"}[1m])) by (pod_name)', start=startTime, end=stopTime, step='5s'))
@@ -164,7 +181,6 @@ def promQueries(startTime, stopTime, testDirPath):
 
     createRawCSVs(timestampList, podNameList, testDirPath, podMetricsDict)
 
-
 def main():
     #construct & parse args
     ap = argparse.ArgumentParser()
@@ -178,22 +194,39 @@ def main():
         help="Name of locust file to be used for this round of testing")
     # add more args here
     args = vars(ap.parse_args())
-
-    # TODO: UPDATE INPUT PARAMS
+    #kubernetes setup
+    config.load_kube_config()
+    extensions_v1beta1 = client.ExtensionsV1beta1Api()
+    clusterConfs = clusterInfo()
+   
+   # -------- Main testing loop Start ----------
     for line in open(args["file"]):
-        lnArgs = [x.strip() for x in line.split(' ')]
-        if len(lnArgs) != 4: # change val to appropriate cnt later
+        lnArgs = [x.strip() for x in line.split(',')]
+        if len(lnArgs) != 11: # change val to appropriate cnt later
             print("Skipping experiment %s, wrong number of args" % lnArgs[0])
             continue
         exp_Nm = lnArgs[0]
         runtime = lnArgs[1]
         clientCnt = lnArgs[2]
         hatchRate = lnArgs[3]
+        clusterConfs.interferenceZone = lnArgs[4]
+        clusterConfs.interferenceLvl = lnArgs[5]
+        clusterConfs.workflowDeplList['cart'] = lnArgs[6]
+        clusterConfs.workflowDeplList['catalogue'] = lnArgs[7]
+        clusterConfs.workflowDeplList['shipping'] = lnArgs[8]
+        start_po = lnArgs[9]
+        end_po = lnArgs[10]
         # add more var defs here ^ if more args get added to lines (like node color interference is on)
         print("Current running experiment: %s\n" % exp_Nm)
         testDirPath = testDirInit(exp_Nm) #Create current test's directory
         locustDur = runtime + "s"
         
+        # setup cluster using input params
+        print("Configuring cluster to match experiment input\n")
+        clusterSetup(extensions_v1beta1, clusterConfs)
+        print("5 second grace period\n")
+        time.sleep(20)
+
         # build locust command to run locust
         locustCmd = "locust --host http://" + args["k8url"] + " -f " + args["locustF"] + " -c " + clientCnt + " -r " + hatchRate + " -t " + locustDur + " --no-web --only-summary --csv=locust"
         locustArgs = shlex.split(locustCmd)
@@ -203,6 +236,9 @@ def main():
 
         # Get time-stamp before running test
         print("Test %s start\n" % exp_Nm)
+
+        # TODO: add perfstat shell cmd in 
+        
         startT = time.time() 
         
         # Exec locust command, exporting to CSV file & using params passed in through testParam file
@@ -217,7 +253,6 @@ def main():
         
         # Exec Prometheus API query(s) to gather metrics & build resulting csv files
         promQueries(startT, stopT, testDirPath)
- 
-    
+        
 
 main()

@@ -31,7 +31,7 @@ def post_process_perfstat(filename):
                 record.append(line.split(',')[1])
             
             record.append(hostname) 
-            print record
+            print(record)
             df.append(record)
     header=["cycle","instructions","LLC-load-misses","hostname"]
     write_to_csv(df,header,output_file)
