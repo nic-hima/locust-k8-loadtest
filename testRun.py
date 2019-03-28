@@ -13,7 +13,9 @@ from kubernetes import client, config
 import json
 import csv
 import yaml
+import datetime
 from clusterConfig import clusterSetup
+from clusterConfig import deletebatchJobs 
 
 #TODO: Add ability to place interference pods on specific nodes in cluster
 #TODO: Add ability to scale different number of pods for each micro-service
@@ -33,9 +35,10 @@ class podDataCollection(object):
 class clusterInfo(object):
     testNS = "default"
     workflowDeplList = {"cart": 0, "shipping": 0, "catalogue": 0}
-    iFerenceDepNm = ""
     interferenceZone = ""
     interferenceLvl = 0
+    interferenceCompletionCount = 0
+    interferenceType = "stream"
 
     
 def testDirInit(expName):
@@ -197,6 +200,8 @@ def main():
     #kubernetes setup
     config.load_kube_config()
     extensions_v1beta1 = client.ExtensionsV1beta1Api()
+    batch_v1beta1 = client.BatchV1Api()
+
     clusterConfs = clusterInfo()
    
    # -------- Main testing loop Start ----------
@@ -207,10 +212,10 @@ def main():
             continue
         exp_Nm = lnArgs[0]
         runtime = lnArgs[1]
-        clientCnt = lnArgs[2]
-        hatchRate = lnArgs[3]
+        clientCnt = lnArgs[3]
+        hatchRate = lnArgs[2]
         clusterConfs.interferenceZone = lnArgs[4]
-        clusterConfs.interferenceLvl = lnArgs[5]
+        clusterConfs.interferenceLvl = int(lnArgs[5])
         clusterConfs.workflowDeplList['cart'] = lnArgs[6]
         clusterConfs.workflowDeplList['catalogue'] = lnArgs[7]
         clusterConfs.workflowDeplList['shipping'] = lnArgs[8]
@@ -223,7 +228,7 @@ def main():
         
         # setup cluster using input params
         print("Configuring cluster to match experiment input\n")
-        clusterSetup(extensions_v1beta1, clusterConfs)
+        clusterSetup(extensions_v1beta1, batch_v1beta1,clusterConfs)
         print("5 second grace period\n")
         time.sleep(20)
 
@@ -238,7 +243,26 @@ def main():
         print("Test %s start\n" % exp_Nm)
 
         # TODO: add perfstat shell cmd in 
+        # Exec perfstat using params passed in through testParam file
+        # #format: python <script_name> exp_name total_duration output_dir
+
+        perfstatCmdString = "python perfstat_driver.py {} {} {}".format(exp_Nm,runtime,testDirPath)
+
+        perfstatArgs = shlex.split(perfstatCmdString)
+        perfstatResultFNm = testDirPath + "/perfstatLog.txt"
+        with open(perfstatResultFNm, 'w+') as perfstat_f:
+            p1 = subprocess.call(perfstatArgs, stdout=perfstat_f, stderr=perfstat_f, shell=False)
         
+        # Exec vmstat using params passed
+        vmstatCmdString = "python vmstat_driver.py {} {} {} {} {}".format(exp_Nm,runtime,testDirPath,start_po,end_po)
+
+        vmstatArgs = shlex.split(vmstatCmdString)
+        vmstatResultFNm = testDirPath + "/vmstatLog.txt"
+        with open(vmstatResultFNm, 'w+') as vmstat_f:
+            p2 = subprocess.call(vmstatArgs, stdout=vmstat_f, stderr=vmstat_f, shell=False)
+
+        print("[debug] start time {}".format(datetime.datetime.now()))
+
         startT = time.time() 
         
         # Exec locust command, exporting to CSV file & using params passed in through testParam file
@@ -248,11 +272,24 @@ def main():
         
         # Once locust command finishes, get end timestamp
         stopT = time.time()
+        print ("[debug] test is completed. post processing")
+
+
+        # delete the batch jobs 
+        if clusterConfs.interferenceLvl > 0:
+            deletebatchJobs(batch_v1beta1,clusterConfs)
+
         moveLocustResults(testDirPath)
         # TODO: Exec kubectl port forward to prometheus pod ?? (currently, command is being run in separate terminal window)
         
         # Exec Prometheus API query(s) to gather metrics & build resulting csv files
+        
         promQueries(startT, stopT, testDirPath)
         
+        time.sleep(60)
+        print("[debug] end time {}".format(datetime.datetime.now()))
+        print ("[debug] End of Test")
+
 
 main()
+

@@ -1,0 +1,18 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: stream
+spec:
+  parallelism: 2
+  completions: 2
+  template:
+    metadata:
+      name: stream-pod
+    spec:
+      containers:
+      - name: stream-container
+        image: joyrahman/stream3:v8
+       # imagePullPolicy: Always
+      nodeSelector:
+        color: red
+      restartPolicy: Never
